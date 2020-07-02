@@ -1,11 +1,18 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, create_engine, Column, DateTime, ForeignKey, func, Integer, String, Sequence, Time, \
-    TIMESTAMP
-from sqlalchemy.ext.declarative import declarative_base, ConcreteBase
-from sqlalchemy.orm import backref, relationship
+from sqlalchemy import Boolean, Column, create_engine, ForeignKey, Integer, Sequence, String, TIMESTAMP
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import create_session, relationship
 
 Base = declarative_base()
+
+
+def get_connection(echo: bool):
+    return create_engine('sqlite:///data.db', echo=echo)
+
+
+def get_session(connection):
+    return create_session(connection)
 
 
 class CollectionSection(Base):

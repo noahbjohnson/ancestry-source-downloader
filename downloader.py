@@ -3,7 +3,10 @@ from typing import List
 
 import pandas as pd
 from selenium import webdriver
+from selenium.common.exceptions import StaleElementReferenceException
 from selenium.webdriver.remote.webelement import WebElement
+
+from database import get_connection
 
 download_button_classname: str = "iconDownload"
 tool_button_classname: str = "iconTools"
@@ -28,6 +31,10 @@ def get_or_make_abs_dir(path: str) -> str:
     if not os.path.exists(path):
         os.mkdir(path)
     return path
+
+
+def clean_string(x: str) -> str:
+    return x.replace("  ", " ").replace(" ", "_").lower()
 
 
 def get_row_values(row: WebElement) -> List[str]:
@@ -72,6 +79,11 @@ class ImagePage:
         self.page_total = page_total
         self.page_number = page_number
 
+    def table_name(self) -> str:
+        title = [clean_string(self.collection_title)]
+        title.extend([clean_string(x) for x in self.breadcrumb_sections])
+        return "_".join(title)
+
 
 class PageScraper:
     """A generic scraper for the ancestry.com image viewer (seadragon1)
@@ -102,9 +114,11 @@ class PageScraper:
         self.get_url(ancestry_login_url)
 
     def get_url(self, url: str):
-        """ Navigates the browser to a url
+        """Navigates the browser to a url :param url: The url to navigate the
+        browser to :type url: str
+
         Args:
-            url (str): The url to navigate the browser to
+            url (str):
         """
         self.chromeDriver.get(url)
 
@@ -157,17 +171,24 @@ class PageScraper:
         self.click_tool_button()
         self.click_download_button()
 
-    def parse_index(self) -> pd.DataFrame:
+    def parse_index(self, retries=0) -> pd.DataFrame:
         """Scrapes the transcribed index table into a data frame"""
-        self.show_index()
-        index_panel_row_elements = self.chromeDriver.find_element_by_class_name(
-                "index-panel-content").find_elements_by_class_name(
-                "grid-row")
-        header_row = get_row_values(index_panel_row_elements[0])
-        body_rows = [get_row_values(x) for x in index_panel_row_elements[1:]]
-        data_frame = pd.DataFrame(data=body_rows, columns=header_row)
-        # TODO: add metadata columns [image_name, page, total pages, etc...]
-        return data_frame
+
+        try:
+            self.show_index()
+            index_panel_row_elements = self.chromeDriver.find_element_by_class_name(
+                    "index-panel-content").find_elements_by_class_name(
+                    "grid-row")
+            header_row = get_row_values(index_panel_row_elements[0])
+            body_rows = [get_row_values(x) for x in index_panel_row_elements[1:]]
+            data_frame = pd.DataFrame(data=body_rows, columns=header_row)
+            # TODO: add metadata columns [image_name, page, total pages, etc...]
+            return data_frame
+        except StaleElementReferenceException as e:
+            if retries > 3:
+                raise e
+            self.chromeDriver.refresh()
+            return self.parse_index(retries=retries + 1)
 
     """
     Static Scraping
@@ -194,7 +215,7 @@ class PageScraper:
 
     def get_page_total(self) -> int:
         """Returns the total number of images or pages in the current section"""
-        return int(self.chromeDriver.find_element_by_class_name("imageCountText").text())
+        return int(self.chromeDriver.find_element_by_class_name("imageCountText").text)
 
     def get_collection_header(self) -> WebElement:
         return self.chromeDriver \
@@ -235,7 +256,7 @@ class PageScraper:
     def scrape_page(self):
         """Scrapes the image and metadata from the current page"""
         assert self.has_image()
-        self.download_image()
+        # self.download_image() #  TODO: Find out how to download to specific location
         return ImagePage(
                 image_name=self.get_image_name_from_path(),
                 collection_title=self.get_collection_title(),
@@ -250,11 +271,19 @@ class PageScraper:
 if __name__ == '__main__':
     scraper = PageScraper()
     status: int = 0
+    connection = get_connection(True)
     while True:
         try:
             input("log in to ancestry and navigate to a record you want to download (press enter to continue, "
                   "ctrl-c to exit) \n")
-            scraper.scrape_page()  # nothing happens to this object yet...
+            image_page = scraper.scrape_page()
+            table_name = image_page.table_name()
+            try:
+                image_page.index.to_sql(table_name, connection, if_exists="append")
+            except:  # TODO: narrow down this catch
+                old_data = pd.read_sql(f'SELECT * FROM "{table_name}"', connection)
+                new_df = pd.concat([old_data, image_page.index])
+                new_df.to_sql(table_name, connection, if_exists="replace", index=False)
         except AssertionError:
             print("Not a valid record page!")
             status = 1
@@ -263,5 +292,6 @@ if __name__ == '__main__':
             break
 
     print("Closing the browser window...")
+    # TODO: add top-level try catch to exit chromium
     scraper.chromeDriver.__exit__()
     exit(status)
