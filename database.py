@@ -13,6 +13,12 @@ class CollectionSection(Base):
 
     Acts as a single recursively referenced table for everything except the pages
      themselves and their records eg: [Federal Census 1990, Illinois, Cook, Chicago, ward 4]
+
+    > collection = CollectionSection(site_id = "1234", name = "New Orleans, Louisiana, Index to Death Records, 1804-1964", link = "https://www.ancestry.com/search/collections/6606", is_root = True, has_pages = False)
+    > collection.children.append(
+            CollectionSection(
+                name = "1953-1960", has_pages = True, index_table_name="new_orleans_deaths_1953_to_1960")
+        )
     """
     __tablename__ = 'collection_section'
     id = Column(Integer, Sequence('collection_section_id_seq'), primary_key=True)
