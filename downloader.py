@@ -1,5 +1,5 @@
 import os
-from typing import List, NoReturn
+from typing import List
 
 import pandas as pd
 from selenium import webdriver
@@ -166,6 +166,7 @@ class PageScraper:
         header_row = get_row_values(index_panel_row_elements[0])
         body_rows = [get_row_values(x) for x in index_panel_row_elements[1:]]
         data_frame = pd.DataFrame(data=body_rows, columns=header_row)
+        # TODO: add metadata columns [image_name, page, total pages, etc...]
         return data_frame
 
     """
