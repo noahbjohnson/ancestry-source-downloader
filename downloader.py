@@ -1,9 +1,10 @@
 import os
+import time
 from typing import List
 
 import pandas as pd
 from selenium import webdriver
-from selenium.common.exceptions import StaleElementReferenceException
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 from selenium.webdriver.remote.webelement import WebElement
 
 from database import get_connection
@@ -48,6 +49,17 @@ def get_row_values(row: WebElement) -> List[str]:
     return [row_cell.text for row_cell in row_cells]
 
 
+class Section:
+    value: str
+    position: int
+    title: str
+
+    def __init__(self, value: str, position: int, title: str):
+        self.title = title
+        self.value = value
+        self.position = position
+
+
 class ImagePage:
     """Container for image_name, collection_title, collection_link,
     breadcrumb_sections, index df
@@ -55,13 +67,13 @@ class ImagePage:
     image_name: str
     collection_title: str
     collection_link: str
-    breadcrumb_sections: List[str]
+    breadcrumb_sections: List[Section]
     index: pd.DataFrame
     page_number: int
     page_total: int
 
     def __init__(self, image_name: str, collection_title: str,
-                 collection_link: str, breadcrumb_sections: List[str], index: pd.DataFrame, page_number: int,
+                 collection_link: str, breadcrumb_sections: List[Section], index: pd.DataFrame, page_number: int,
                  page_total: int):
         """
         Args:
@@ -81,7 +93,7 @@ class ImagePage:
 
     def table_name(self) -> str:
         title = [clean_string(self.collection_title)]
-        title.extend([clean_string(x) for x in self.breadcrumb_sections])
+        # title.extend([clean_string(x.value) for x in self.breadcrumb_sections])
         return "_".join(title)
 
 
@@ -105,6 +117,7 @@ class PageScraper:
                 scraper
         """
         self.chromeDriver = webdriver.Chrome()
+        self.chromeDriver.fullscreen_window()
         self.download_root = get_or_make_abs_dir(
                 os.path.join(
                         os.environ.get(download_root_directory_env_var),
@@ -133,28 +146,36 @@ class PageScraper:
     Page Manipulation
     """
 
+    def close_overlay(self):
+        # close blocking overlay
+        self.chromeDriver.execute_script(f"$(\"#header > div.browse-path-header > div > div.fixed-overlay\").click()")
+
     def click_download_button(self):
         """Clicks the download image button"""
+        self.close_overlay()
         download_button = self.chromeDriver.find_element_by_class_name(download_button_classname)
         download_button.click()
 
     def click_tool_button(self):
         """Clicks the tool popout toggle"""
+        self.close_overlay()
         tool_button = self.chromeDriver.find_element_by_class_name(tool_button_classname)
         tool_button.click()
 
     def click_next_page(self):
         """Clicks the next image arrow button"""
-        next_icon = self.chromeDriver.find_element_by_class_name("iconArrowRight")
-        next_icon.find_element_by_xpath(parent_xpath).click()
+        self.close_overlay()
+        self.next_button().click()
 
     def click_prev_page(self):
         """Clicks the previous image arrow button"""
+        self.close_overlay()
         prev_icon = self.chromeDriver.find_element_by_class_name("iconArrowLeft")
         prev_icon.find_element_by_xpath(parent_xpath).click()
 
     def show_index(self):
         """Toggles the index panel to visible"""
+        self.close_overlay()
         index_button = self.chromeDriver.find_element_by_class_name(index_button_classname)
         if index_button_active_class not in index_button.get_attribute("class"):
             index_button.click()
@@ -172,7 +193,13 @@ class PageScraper:
         self.click_download_button()
 
     def parse_index(self, retries=0) -> pd.DataFrame:
-        """Scrapes the transcribed index table into a data frame"""
+        """Scrapes the transcribed index table into a data frame
+
+        FIXME:
+          this function is taking forever to execute on most pages
+          no rows are returned sometimes
+
+        """
 
         try:
             self.show_index()
@@ -182,11 +209,10 @@ class PageScraper:
             header_row = get_row_values(index_panel_row_elements[0])
             body_rows = [get_row_values(x) for x in index_panel_row_elements[1:]]
             data_frame = pd.DataFrame(data=body_rows, columns=header_row)
-            # TODO: add metadata columns [image_name, page, total pages, etc...]
             return data_frame
-        except StaleElementReferenceException as e:
+        except StaleElementReferenceException as er:
             if retries > 3:
-                raise e
+                raise er
             self.chromeDriver.refresh()
             return self.parse_index(retries=retries + 1)
 
@@ -196,15 +222,22 @@ class PageScraper:
 
     # TODO: has index
 
+    def get_current_url(self) -> str:
+        return self.chromeDriver.current_url.split("?")[0]
+
+    def next_button(self) -> WebElement:
+        return self.chromeDriver.find_element_by_class_name("right").find_element_by_tag_name("button")
+
+    def prev_button(self) -> WebElement:
+        return self.chromeDriver.find_element_by_class_name("left").find_element_by_tag_name("button")
+
     def has_next_page(self) -> bool:
         """Returns if the next page button is clickable"""
-        next_icon = self.chromeDriver.find_element_by_class_name("iconArrowRight")
-        return next_icon.find_element_by_xpath(parent_xpath).is_enabled()
+        return self.next_button().is_enabled()
 
     def has_prev_page(self) -> bool:
         """Returns if the previous page button is clickable"""
-        prev_icon = self.chromeDriver.find_element_by_class_name("iconArrowLeft")
-        return prev_icon.find_element_by_xpath(parent_xpath).is_enabled()
+        return self.prev_button().is_enabled()
 
     def get_page_number_input(self) -> WebElement:
         return self.chromeDriver.find_element_by_class_name("page-input")
@@ -223,12 +256,10 @@ class PageScraper:
             .find_element_by_tag_name("a")
 
     def get_collection_title(self) -> str:
-        collection_link_element = self.get_collection_header()
-        return collection_link_element.text
+        return self.get_collection_header().text
 
     def get_collection_link(self) -> str:
-        collection_link_element = self.get_collection_header()
-        return collection_link_element.get_property("href")
+        return self.get_collection_header().get_property("href")
 
     def has_image(self) -> bool:
         """Asserts that a url has the glob that identifies it as an image viewer page"""
@@ -244,10 +275,26 @@ class PageScraper:
         assert self.has_image()
         return self.chromeDriver.current_url.split("?")[0].split("/")[-1]
 
-    def get_breadcrumb_sections(self) -> List[str]:
-        breadcrumb_section_elements = self.chromeDriver.find_element_by_class_name(
-                "browse-path-header").find_elements_by_tag_name("input")
-        return [x.get_property("value") for x in breadcrumb_section_elements]
+    def get_breadcrumb_sections(self, retries=0) -> List[Section]:
+        try:
+            breadcrumb_section_elements = self.chromeDriver.find_element_by_class_name(
+                    "browse-path-header").find_elements_by_tag_name("input")
+            values = []
+            position = 0
+            for section in breadcrumb_section_elements:
+                value = section.get_property("value")
+                section.find_element_by_xpath(parent_xpath).click()
+                title = self.chromeDriver.find_element_by_class_name(
+                        "breadcrumbTitle").text
+                values.append(Section(value=value, title=title, position=position))
+                position += 1
+            return values
+        except NoSuchElementException as er:
+            if retries > 3:
+                raise er
+            self.chromeDriver.refresh()
+            time.sleep(.1)
+            return self.get_breadcrumb_sections(retries=retries + 1)
 
     """
     User Methods
@@ -257,14 +304,35 @@ class PageScraper:
         """Scrapes the image and metadata from the current page"""
         assert self.has_image()
         # self.download_image() #  TODO: Find out how to download to specific location
+        print("Parsing index \n")
+        page_index = self.parse_index()  # TODO: handle pages without index
+        print("Parsing categories \n")
+        breadcrumb_sections = self.get_breadcrumb_sections()
+
+        print("Parsing page counts \n")
+        page_index.insert(len(page_index.columns), "page", self.get_page_number())
+        page_index.insert(len(page_index.columns), "total_pages", self.get_page_total())
+        print("Parsing image name \n")
+        page_index.insert(len(page_index.columns), "image", self.get_image_name_from_path())
+        print("Parsing collection info \n")
+        page_index.insert(len(page_index.columns), "collection_title", self.get_collection_title())
+        page_index.insert(len(page_index.columns), "collection_link", self.get_collection_link())
+        page_index.insert(len(page_index.columns), "page_link", self.get_current_url())
+
+        for section in breadcrumb_sections:
+            page_index.insert(len(page_index.columns), f"breadcrumb_{section.position}",
+                              [section.value for x in range(len(page_index))])
+            page_index.insert(len(page_index.columns), f"breadcrumb_{section.position}_title",
+                              [section.title for x in range(len(page_index))])
+
         return ImagePage(
-                image_name=self.get_image_name_from_path(),
-                collection_title=self.get_collection_title(),
+                index=page_index,
                 collection_link=self.get_collection_link(),
-                index=self.parse_index(),  # TODO: handle pages without index
-                breadcrumb_sections=self.get_breadcrumb_sections(),
+                collection_title=self.get_collection_title(),
                 page_number=self.get_page_number(),
-                page_total=self.get_page_total()
+                page_total=self.get_page_total(),
+                breadcrumb_sections=breadcrumb_sections,
+                image_name=self.get_image_name_from_path()
         )
 
 
@@ -274,20 +342,36 @@ if __name__ == '__main__':
     connection = get_connection(True)
     while True:
         try:
-            input("log in to ancestry and navigate to a record you want to download (press enter to continue, "
-                  "ctrl-c to exit) \n")
-            image_page = scraper.scrape_page()
-            table_name = image_page.table_name()
-            try:
-                image_page.index.to_sql(table_name, connection, if_exists="append")
-            except:  # TODO: narrow down this catch
-                old_data = pd.read_sql(f'SELECT * FROM "{table_name}"', connection)
-                new_df = pd.concat([old_data, image_page.index])
-                new_df.to_sql(table_name, connection, if_exists="replace", index=False)
+            input(
+                    "log in to ancestry and navigate to a record section you want to download "
+                    "(press enter to continue, "
+                    "ctrl-c to exit) \n"
+            )
+            while True:
+                assert scraper.has_image()
+                image_page = scraper.scrape_page()
+                table_name = image_page.table_name()
+                try:
+                    print("Attempting to save table \n")
+                    image_page.index.to_sql(table_name, connection, if_exists="append")
+                except BaseException as e:  # TODO: narrow down this catch
+                    print(e)
+                    print("Attempting to append table \n")
+                    old_data = pd.read_sql(f'SELECT * FROM "{table_name}"', connection)
+                    new_df = pd.concat([old_data, image_page.index])
+                    new_df.to_sql(table_name, connection, if_exists="replace", index=False)
+                if scraper.has_next_page():
+                    print("Navigating to next page \n")
+                    time.sleep(.25)
+                    scraper.click_next_page()
+                    time.sleep(.25)
+                else:
+                    print("Final page - break \n")
+                    break
         except AssertionError:
             print("Not a valid record page!")
-            status = 1
-            break
+            # status = 1
+            # break
         except KeyboardInterrupt:
             break
 
