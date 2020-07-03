@@ -1,24 +1,37 @@
 import os
 import time
-from typing import List
+from typing import List, Tuple
 
 import pandas as pd
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 from selenium.webdriver.remote.webelement import WebElement
+from sqlalchemy.engine import Engine
 
 from database import get_connection
 
-download_button_classname: str = "iconDownload"
-tool_button_classname: str = "iconTools"
-index_button_classname: str = "iconPersonList"
-index_button_active_class: str = "toggleActive"
-default_download_folder: str = "Documents/ancestry.com"
-ancestry_login_url: str = "https://ancestry.com/signin"
-grid_cell = "grid-cell"
-download_root_directory_env_var = 'HOME'
-parent_xpath = "./.."
-imageviewer_glob = "ancestry.com/imageviewer"
+"""
+Configuration Strings
+"""
+
+CLEAN_STRING_REPLACEMENTS: List[Tuple[str, str]] = [
+    ("  ", " "),
+    (" ", "_")
+]
+GRID_CONTAINER = "grid-container"
+DOWNLOAD_BUTTON_CLASS = "iconDownload"
+TOOL_BUTTON_CLASS = "iconTools"
+INDEX_BUTTON_CLASS = "iconPersonList"
+INDEX_BUTTON_ACTIVE_CLASS: str = "toggleActive"
+DEFAULT_DOWNLOAD_FOLDER: str = "Documents/ancestry.com"
+GRID_CELL: str = "grid-cell"
+DOWNLOAD_ROOT_DIRECTORY: str = os.environ.get('HOME')
+CHILDREN_XPATH = "*"
+PARENT_XPATH: str = "./.."
+IMAGE_VIEWER_GLOB: str = "ancestry.com/imageviewer"
+# ANCESTRY_LOGIN_URL: str = "https://ancestry.com/signin"
+ANCESTRY_LOGIN_URL: str = "https://www.ancestry.com/imageviewer/collections/6742/images/4239762-00094" \
+                          "?ssrc=&backlabel=Return&backurl=https%3A%2F%2Fwww.ancestry.com%2F"
 
 
 def get_or_make_abs_dir(path: str) -> str:
@@ -35,18 +48,20 @@ def get_or_make_abs_dir(path: str) -> str:
 
 
 def clean_string(x: str) -> str:
-    return x.replace("  ", " ").replace(" ", "_").lower()
+    for a, b in CLEAN_STRING_REPLACEMENTS:
+        x = x.replace(a, b)
+    return x.lower()
 
 
-def get_row_values(row: WebElement) -> List[str]:
-    """Takes an element with the grid-row class and returns an array of its
-    values
-
-    Args:
-        row (WebElement):
-    """
-    row_cells = row.find_elements_by_class_name(grid_cell)
-    return [row_cell.text for row_cell in row_cells]
+def df_create_or_append_sql(data_frame: pd.DataFrame, con: Engine, table_name: str,
+                            remove_duplicates: bool = True):
+    joined = pd.concat([
+        pd.read_sql(f'SELECT * FROM "{table_name}"', con),
+        data_frame
+    ])
+    if remove_duplicates:
+        joined.drop_duplicates(inplace=True)
+    joined.to_sql(table_name, con, if_exists="replace", index=False)
 
 
 class Section:
@@ -108,23 +123,23 @@ class PageScraper:
     download_folder: str
     download_root: str
 
-    def __init__(self, download_folder_param: str = default_download_folder):
+    def __init__(self, download_folder: str = DEFAULT_DOWNLOAD_FOLDER):
         """
         :param : type download_folder_param: str
 
         Args:
-            download_folder_param (str): The root download directory for the
+            download_folder (str): The root download directory for the
                 scraper
         """
         self.chromeDriver = webdriver.Chrome()
         self.chromeDriver.fullscreen_window()
         self.download_root = get_or_make_abs_dir(
                 os.path.join(
-                        os.environ.get(download_root_directory_env_var),
-                        download_folder_param
+                        DOWNLOAD_ROOT_DIRECTORY,
+                        download_folder
                 )
         )
-        self.get_url(ancestry_login_url)
+        self.get_url(ANCESTRY_LOGIN_URL)
 
     def get_url(self, url: str):
         """Navigates the browser to a url :param url: The url to navigate the
@@ -153,13 +168,13 @@ class PageScraper:
     def click_download_button(self):
         """Clicks the download image button"""
         self.close_overlay()
-        download_button = self.chromeDriver.find_element_by_class_name(download_button_classname)
+        download_button = self.chromeDriver.find_element_by_class_name(DOWNLOAD_BUTTON_CLASS)
         download_button.click()
 
     def click_tool_button(self):
         """Clicks the tool popout toggle"""
         self.close_overlay()
-        tool_button = self.chromeDriver.find_element_by_class_name(tool_button_classname)
+        tool_button = self.chromeDriver.find_element_by_class_name(TOOL_BUTTON_CLASS)
         tool_button.click()
 
     def click_next_page(self):
@@ -171,13 +186,13 @@ class PageScraper:
         """Clicks the previous image arrow button"""
         self.close_overlay()
         prev_icon = self.chromeDriver.find_element_by_class_name("iconArrowLeft")
-        prev_icon.find_element_by_xpath(parent_xpath).click()
+        prev_icon.find_element_by_xpath(PARENT_XPATH).click()
 
     def show_index(self):
         """Toggles the index panel to visible"""
         self.close_overlay()
-        index_button = self.chromeDriver.find_element_by_class_name(index_button_classname)
-        if index_button_active_class not in index_button.get_attribute("class"):
+        index_button = self.chromeDriver.find_element_by_class_name(INDEX_BUTTON_CLASS)
+        if INDEX_BUTTON_ACTIVE_CLASS not in index_button.get_attribute("class"):
             index_button.click()
         else:
             index_button.click()
@@ -192,24 +207,32 @@ class PageScraper:
         self.click_tool_button()
         self.click_download_button()
 
+    @staticmethod
+    def grid_row_to_values(row: WebElement) -> List[str]:
+        row_cells = row.find_elements_by_xpath('*')
+        return [row_cell.text for row_cell in row_cells]
+
     def parse_index(self, retries=0) -> pd.DataFrame:
         """Scrapes the transcribed index table into a data frame
 
         FIXME:
           this function is taking forever to execute on most pages
           no rows are returned sometimes
-
         """
 
         try:
             self.show_index()
-            index_panel_row_elements = self.chromeDriver.find_element_by_class_name(
-                    "index-panel-content").find_elements_by_class_name(
-                    "grid-row")
-            header_row = get_row_values(index_panel_row_elements[0])
-            body_rows = [get_row_values(x) for x in index_panel_row_elements[1:]]
+            index_panel_row_elements = self.chromeDriver \
+                .find_element_by_class_name(GRID_CONTAINER) \
+                .find_elements_by_xpath(CHILDREN_XPATH)
+            header_row = self.grid_row_to_values(index_panel_row_elements[0])
+            body_rows = [self.grid_row_to_values(x) for x in index_panel_row_elements[1:]]
             data_frame = pd.DataFrame(data=body_rows, columns=header_row)
-            return data_frame
+            rows, _ = data_frame.shape
+            if rows < 1 and retries <= 3:
+                return self.parse_index(retries=retries + 1)
+            else:
+                return data_frame
         except StaleElementReferenceException as er:
             if retries > 3:
                 raise er
@@ -226,9 +249,11 @@ class PageScraper:
         return self.chromeDriver.current_url.split("?")[0]
 
     def next_button(self) -> WebElement:
+        """Returns the next page button"""
         return self.chromeDriver.find_element_by_class_name("right").find_element_by_tag_name("button")
 
     def prev_button(self) -> WebElement:
+        """Returns the previous page button"""
         return self.chromeDriver.find_element_by_class_name("left").find_element_by_tag_name("button")
 
     def has_next_page(self) -> bool:
@@ -240,6 +265,7 @@ class PageScraper:
         return self.prev_button().is_enabled()
 
     def get_page_number_input(self) -> WebElement:
+        """Returns the page number input element"""
         return self.chromeDriver.find_element_by_class_name("page-input")
 
     def get_page_number(self) -> int:
@@ -263,7 +289,7 @@ class PageScraper:
 
     def has_image(self) -> bool:
         """Asserts that a url has the glob that identifies it as an image viewer page"""
-        return imageviewer_glob in self.chromeDriver.current_url
+        return IMAGE_VIEWER_GLOB in self.chromeDriver.current_url
 
     def get_image_name_from_path(self) -> str:
         """Extracts the name of the image file from the viewer url :param path: Url
@@ -283,7 +309,7 @@ class PageScraper:
             position = 0
             for section in breadcrumb_section_elements:
                 value = section.get_property("value")
-                section.find_element_by_xpath(parent_xpath).click()
+                section.find_element_by_xpath(PARENT_XPATH).click()
                 title = self.chromeDriver.find_element_by_class_name(
                         "breadcrumbTitle").text
                 values.append(Section(value=value, title=title, position=position))
@@ -350,16 +376,8 @@ if __name__ == '__main__':
             while True:
                 assert scraper.has_image()
                 image_page = scraper.scrape_page()
-                table_name = image_page.table_name()
-                try:
-                    print("Attempting to save table \n")
-                    image_page.index.to_sql(table_name, connection, if_exists="append")
-                except BaseException as e:  # TODO: narrow down this catch
-                    print(e)
-                    print("Attempting to append table \n")
-                    old_data = pd.read_sql(f'SELECT * FROM "{table_name}"', connection)
-                    new_df = pd.concat([old_data, image_page.index])
-                    new_df.to_sql(table_name, connection, if_exists="replace", index=False)
+                print("Attempting to save table \n")
+                df_create_or_append_sql(image_page.index, connection, image_page.table_name())
                 if scraper.has_next_page():
                     print("Navigating to next page \n")
                     time.sleep(.25)
