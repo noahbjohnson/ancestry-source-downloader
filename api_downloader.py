@@ -41,6 +41,13 @@ class CollectionEntry(TypedDict):
 
 
 def format_pagination_body(page: int, size: int, paging_token=""):
+    """
+
+    :param page:
+    :param size:
+    :param paging_token:
+    :return:
+    """
     return {
         "queryTerms": {},
         "sortByKey":  "ACTIVE_DATE",
@@ -80,13 +87,20 @@ class Controller(object):
     _password: str
 
     def __init__(self, user: str, pas: str):
+        """
+
+        :param user: Ancestry.com username
+        :param pas: Ancestry.com password
+        """
         self._session = requests.Session()
         self._username = user
         self._password = pas
         self._login()
 
     def _login(self):
+        """Authenticate with the ancestry API"""
         if not self._authenticated:
+            print("Logging in")
             self._session.post("https://www.ancestry.com/account/signin/frame/authenticate",
                                {"username": self._username, "password": self._password})
             self._authenticated = True
@@ -96,53 +110,53 @@ class Controller(object):
         Base.metadata.create_all(self._db_engine)
         self._engine_initialized = True
 
-    def get_db_session(self) -> Session:
+    def _get_db_session(self) -> Session:
         if not self._engine_initialized:
             self._init_db_engine()
         return sessionmaker(bind=self._db_engine)()
 
-    def save_collection_metadata(self, dbid: int):
+    def _get_metadata_target(self) -> int:
+        """ Selects next target for updating collection metadata
+
+        :return: Collection ID to target
+        """
+        session = self._get_db_session()
+        collection = session.query(Collection).order_by(Collection.time_updated.asc(),
+                                                        Collection.collection_feature.asc()).filter_by(
+                database_name=None).first()
+        return collection.collection_id
+
+    def save_collection_metadata(self, dbid: int = 0):
+        """ Save metadata to the collection record from endpoints other than search
+
+        :param dbid: Optional, which collection id to save metadata for. Defaults to the least recently updated record.
+        :return: None
+        """
+        if not dbid:
+            dbid = self._get_metadata_target()
+
         url: str = f"https://www.ancestry.com/imageviewer/api/media/info-by-id?dbId={dbid}"
         url2: str = f"https://www.ancestry.com/imageviewer/api/collection/id?dbId={dbid}"
 
-        parsed = self._session.get(url)
-        print(parsed.text)
-        image_info = parsed.json()['imageInfo']
-        database_name: str = str(image_info["collectionInfo"]['databaseName'])
-        navigation_levels: List[str] = list(image_info['structureType'].values())
-        category_name: str = str(image_info["collectionInfo"]['primaryCategoryName'])
-        category_id: str = str(image_info["collectionInfo"]['primaryCategoryId'])
-        publish_year: int = int(image_info['collectionInfo']['publicationYear'])
-
-        parsed = self._session.get(url2).json()
-        is_yearbook = parsed['isYearbookCollection']
-        source_info = parsed['onlineSourceInfo']
-        title = parsed['collectionTitle']
-
-        db_session = self.get_db_session()
+        db_session = self._get_db_session()
         exists_query = db_session.query(Collection).filter_by(collection_id=dbid)
         if exists_query.scalar():
             collection = exists_query.first()
-            collection.set_levels(navigation_levels)
-            collection.database_name = database_name
-            collection.collection_title = title
-            collection.category_id = category_id
-            collection.category_name = category_name
-            collection.source_info = source_info
-            collection.is_yearbook_collection = is_yearbook
-            collection.publication_year = publish_year
-        else:
-            collection = Collection(
-                    collection_id=dbid,
-                    database_name=database_name,
-                    collection_title=title,
-                    category_id=category_id,
-                    category_name=category_name,
-                    source_info=source_info,
-                    is_yearbook_collection=is_yearbook,
-                    publication_year=publish_year
-            )
-            collection.set_levels(navigation_levels)
+            if collection.collection_feature != "indexOnly":
+                parsed = self._session.get(url)
+                if parsed.ok:
+                    image_info = parsed.json()['imageInfo']
+                    collection.database_name = str(image_info["collectionInfo"]['databaseName'])
+                    collection.set_levels(list(image_info['structureType'].values()))
+                    collection.category_name = str(image_info["collectionInfo"]['primaryCategoryName'])
+                    collection.category_id = str(image_info["collectionInfo"]['primaryCategoryId'])
+                    collection.publication_year = int(image_info['collectionInfo']['publicationYear'])
+            parsed = self._session.get(url2)
+            if parsed.ok:
+                collection.collection_title = parsed.json()['collectionTitle']
+                collection.source_info = parsed.json()['onlineSourceInfo']
+                collection.is_yearbook_collection = parsed.json()['isYearbookCollection']
+            db_session.commit()
 
     def save_collections_to_disk(self, n: int = 1000):
         def search_post(page: int, size: int, paging_token=""):
@@ -186,7 +200,7 @@ class Controller(object):
                         f.write(res.text)
 
     def load_collections_into_db_from_disk(self):
-        db_session = self.get_db_session()
+        db_session = self._get_db_session()
         for file in os.scandir("data/temp"):
             file_name: str = file.name
             if file.is_file() and "collections" in file_name and file_name.endswith(".json"):
