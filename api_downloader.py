@@ -14,6 +14,8 @@ from actions.auth import login
 from api_scrapers.collection_metadata import get_collection_metadata
 from models.collection import Base, Collection
 
+API_SEARCH = "https://www.ancestry.com/search/collections/catalog/api/search"
+
 
 class InvalidInputError(ValueError):
     """Invalid collection id or other input is passed"""
@@ -70,81 +72,101 @@ def format_pagination_body(page: int, size: int, paging_token=""):
     }
 
 
+def random_sleep(min_sec=1, max_sec=30, log=True, factor=1):
+    """Sleep for a random number of seconds
+
+    :param min_sec:
+    :param max_sec:
+    :param log:
+    :param factor:
+    :return:
+    """
+    min_sec = min_sec * factor
+    max_sec = max_sec * factor
+    sleep_time = random.randint(min_sec, max_sec)
+    if log:
+        print(f"Waiting for {sleep_time}s")
+    time.sleep(sleep_time)
+
+
 def save_collections_to_disk(requests_session: requests.Session, n: int = 1000):
+    def search_post(page: int, size: int, paging_token=""):
+        return requests_session.post(
+                API_SEARCH,
+                json=format_pagination_body(page, size, paging_token=paging_token)
+        )
+
+    def get_total_results() -> int:
+        return search_post(1, 1).json()['TotalResults']
+
     # get total collection count
-    r = requests_session.post(
-            "https://www.ancestry.com/search/collections/catalog/api/search",
-            json=format_pagination_body(1, 1)
-    )
-    total_results = r.json()['TotalResults']
+    total_results = get_total_results()
+
+    def log_page(page_num: int, retry=False):
+        if retry:
+            print(f"rate limit hit on page {page_num}. trying again\n")
+        print(f"getting page {page_num} of {total_results}")
+
+    # Initialize loop variables
     pagination_token = [""]
+    loop_count = (total_results // n) + 1
+
     # get n results at a time
-    for i in range((total_results // n) + 1):
-        sleep_time = random.randint(1, 30)
-        print(f"getting page {i} with a {sleep_time}s delay")
-        time.sleep(sleep_time)
+    for i in range(loop_count):
+        log_page(i)
+        random_sleep()
         with open(f"data/collections{i}.json", "w") as f:
-            res = requests_session.post(
-                    "https://www.ancestry.com/search/collections/catalog/api/search",
-                    json=format_pagination_body(i + 1, n, paging_token=pagination_token[0])
-            )
-            if not res.ok:
-                print(f"rate limit hit on page {i}")
-                print(f"getting page {i} with a {sleep_time * 3}s delay")
-                time.sleep(sleep_time * 3)
-                res = requests_session.post(
-                        "https://www.ancestry.com/search/collections/catalog/api/search",
-                        json=format_pagination_body(i + 1, n, paging_token=pagination_token[0])
-                )
+            res = search_post(i + 1, n, paging_token=pagination_token[0])
+            if res.ok:
+                pagination_token[0] = res.json()['PagingInfo']['PagingToken']
+                f.write(res.text)
+            else:
+                log_page(i, retry=True)
+                random_sleep(factor=3)
+                res = search_post(i + 1, n, paging_token=pagination_token[0])
                 if not res.ok:
-                    raise ResourceWarning(f"rate limit hard on page {i}")
+                    raise ResourceWarning(f"rate limit critical on page {i}")
                 else:
                     pagination_token[0] = res.json()['PagingInfo']['PagingToken']
                     f.write(res.text)
-            else:
-                pagination_token[0] = res.json()['PagingInfo']['PagingToken']
-                f.write(res.text)
 
 
 def load_collections_into_db_from_disk(db_session: Session):
     for file in os.scandir("data"):
-        if file.is_file():
-            file_name: str = file.name
-            if "collections" in file_name and file_name.endswith(".json"):
-                print(f"parsing {file_name}")
-                with open(file.path) as file_io:
-                    file_data = json.loads(file_io.read())
-                    entries: List[CollectionEntry] = file_data['gridData']
-                    for entry in entries:
-                        #
-                        if db_session.query(Collection).filter_by(collection_id=int(entry['dbId'])).scalar():
-                            collection = db_session.query(Collection).filter_by(
-                                    collection_id=int(entry['dbId'])).first()
-                            collection.collection_title = entry['title']
-                            collection.collection_id = int(entry['dbId'])
-                            collection.collection_created = entry['activeDate']
-                            collection.collection_updated = entry['updatedDate']
-                            collection.collection_feature = entry['collectionFeature']
-                            collection.native_culture_id = entry['nativeCultureId']
-                            collection.category_id = entry['categoryId']
-                            collection.record_count = int(entry['recordCount'].replace(",", ""))
-                            collection.collection_collection = entry['collection']
-                            collection.description = entry['description']['Value']
-                        else:
-                            collection = Collection(
-                                    collection_id=int(entry['dbId']),
-                                    collection_title=entry['title'],
-                                    collection_created=entry['activeDate'],
-                                    collection_updated=entry['updatedDate'],
-                                    collection_feature=entry['collectionFeature'],
-                                    native_culture_id=entry['nativeCultureId'],
-                                    category_id=entry['categoryId'],
-                                    record_count=int(entry['recordCount'].replace(",", "")),
-                                    collection_collection=entry['collection'],
-                                    description=entry['description']['Value']
-                            )
-                            db_session.add(collection)
-                    db_session.commit()
+        file_name: str = file.name
+        if file.is_file() and "collections" in file_name and file_name.endswith(".json"):
+            print(f"parsing {file_name}")
+            with open(file.path) as file_io:
+                file_data = json.loads(file_io.read())
+                entries: List[CollectionEntry] = file_data['gridData']
+                for entry in entries:
+                    exists_query = db_session.query(Collection).filter_by(collection_id=int(entry['dbId']))
+                    if exists_query.scalar():
+                        collection = exists_query.first()
+                        collection.collection_title = entry['title']
+                        collection.collection_created = entry['activeDate']
+                        collection.collection_updated = entry['updatedDate']
+                        collection.collection_feature = entry['collectionFeature']
+                        collection.native_culture_id = entry['nativeCultureId']
+                        collection.category_id = entry['categoryId']
+                        collection.record_count = int(entry['recordCount'].replace(",", ""))
+                        collection.collection_collection = entry['collection']
+                        collection.description = entry['description']['Value']
+                    else:
+                        collection = Collection(
+                                collection_id=int(entry['dbId']),
+                                collection_title=entry['title'],
+                                collection_created=entry['activeDate'],
+                                collection_updated=entry['updatedDate'],
+                                collection_feature=entry['collectionFeature'],
+                                native_culture_id=entry['nativeCultureId'],
+                                category_id=entry['categoryId'],
+                                record_count=int(entry['recordCount'].replace(",", "")),
+                                collection_collection=entry['collection'],
+                                description=entry['description']['Value']
+                        )
+                        db_session.add(collection)
+                db_session.commit()
 
 
 if __name__ == '__main__':
@@ -159,17 +181,16 @@ if __name__ == '__main__':
 
     with requests.Session() as s:
 
-        with webdriver.Chrome() as driver:
-            # login in browser and steal cookies
-            driver.minimize_window()
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.headless = True
+        with webdriver.Chrome(options=chrome_options) as driver:
             login(driver, username, password)
             c = [s.cookies.set(c['name'], c['value']) for c in driver.get_cookies()]
 
-    # load into db from disk
-    engine = create_engine('sqlite:///api.db', echo=True)
-    SessionMaker = sessionmaker(bind=engine)
-    Base.metadata.create_all(engine)
-    session = SessionMaker()
+        engine = create_engine('sqlite:///api.db', echo=True)
+        SessionMaker = sessionmaker(bind=engine)
+        Base.metadata.create_all(engine)
+        session = SessionMaker()
 
     save_collections_to_disk(s)
 
