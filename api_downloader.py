@@ -60,7 +60,7 @@ def format_pagination_body(page: int, size: int, paging_token=""):
     }
 
 
-def random_sleep(min_sec=1, max_sec=30, log=True, factor=1):
+def random_sleep(min_sec: float = 1, max_sec: float = 30, log=True, factor=1):
     """Sleep for a random number of seconds
 
     :param min_sec:
@@ -71,7 +71,7 @@ def random_sleep(min_sec=1, max_sec=30, log=True, factor=1):
     """
     min_sec = min_sec * factor
     max_sec = max_sec * factor
-    sleep_time = random.randint(min_sec, max_sec)
+    sleep_time = random.randint(min_sec * 1000, max_sec * 1000) / 1000
     if log:
         print(f"Waiting for {sleep_time}s")
     time.sleep(sleep_time)
@@ -152,10 +152,9 @@ class Controller(object):
                     collection.category_id = str(image_info["collectionInfo"]['primaryCategoryId'])
                     collection.publication_year = int(image_info['collectionInfo']['publicationYear'])
             parsed = self._session.get(url2)
-            if parsed.ok:
-                collection.collection_title = parsed.json()['collectionTitle']
-                collection.source_info = parsed.json()['onlineSourceInfo']
-                collection.is_yearbook_collection = parsed.json()['isYearbookCollection']
+            collection.collection_title = parsed.json()['collectionTitle']
+            collection.source_info = parsed.json()['onlineSourceInfo']
+            collection.is_yearbook_collection = parsed.json()['isYearbookCollection']
             db_session.commit()
 
     def save_collections_to_disk(self, n: int = 1000):
@@ -237,6 +236,14 @@ class Controller(object):
                             db_session.add(collection)
                     db_session.commit()
 
+    def get_metadata_loop(self, limit_seconds=600):
+        started = time.time()
+        while True:
+            self.save_collection_metadata()
+            random_sleep(.25, .75)
+            if time.time() - started > limit_seconds:
+                break
+
 
 if __name__ == '__main__':
     dotenv.load_dotenv()
@@ -246,5 +253,7 @@ if __name__ == '__main__':
         raise EnvironmentError("Username and password environment variables not set")
     controller = Controller(username, password)
 
-    controller.save_collections_to_disk()
-    controller.load_collections_into_db_from_disk()
+    # controller.save_collections_to_disk()
+    # controller.load_collections_into_db_from_disk()
+
+    # controller.get_metadata_loop()
