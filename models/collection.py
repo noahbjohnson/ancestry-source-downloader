@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import List
 
-from sqlalchemy import Boolean, Column, Integer, Sequence, String, TIMESTAMP
+from sqlalchemy import Boolean, Column, ForeignKey, Integer, Sequence, String, TIMESTAMP
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
 
 Base = declarative_base()
 
@@ -10,7 +11,7 @@ Base = declarative_base()
 class Collection(Base):
     """An ancestry.com record collection"""
     __tablename__ = 'collection'
-    id = Column(Integer, Sequence('collection_section_id_seq'), primary_key=True)
+    id = Column(Integer, Sequence('collection_id_seq'), primary_key=True)
     # Ancestry collection id
     collection_id = Column(Integer, nullable=False, index=True, unique=True)
     # name (ie 1790 census)
@@ -44,6 +45,8 @@ class Collection(Base):
     time_created = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
     time_updated = Column(TIMESTAMP, onupdate=datetime.utcnow, nullable=False, default=datetime.utcnow)
 
+    sections = relationship("Section")
+
     def __repr__(self):
         return "<Collection(id='%s')>" % self.collection_id
 
@@ -52,3 +55,25 @@ class Collection(Base):
 
     def set_levels(self, levels: List[str]):
         self.navigation_levels = "|".join(levels)
+
+
+class Section(Base):
+    """A breadcrumb/browse section for a collection breakdown"""
+    __tablename__ = "section"
+    id = Column(Integer, Sequence('section_id_seq'), primary_key=True)
+    value = Column(String(256))
+    locale_value = Column(String(256))
+    description = Column(String(1024))
+
+    has_child_levels = Column(Boolean)
+
+    collection = Column(Integer, ForeignKey('collection.id'), nullable=True)
+
+    parent_id = Column(Integer, ForeignKey('section.id'), nullable=True)
+    children = relationship("Section")
+
+    time_created = Column(TIMESTAMP, default=datetime.utcnow, nullable=False)
+    time_updated = Column(TIMESTAMP, onupdate=datetime.utcnow, nullable=False, default=datetime.utcnow)
+
+    def __repr__(self):
+        return "<Section(id='%s')>" % self.value

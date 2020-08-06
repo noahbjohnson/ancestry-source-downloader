@@ -10,7 +10,7 @@ import sqlalchemy.engine
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from models.collection import Base, Collection
+from models.collection import Base, Collection, Section
 
 API_SEARCH = "https://www.ancestry.com/search/collections/catalog/api/search"
 
@@ -71,7 +71,7 @@ def random_sleep(min_sec: float = 1, max_sec: float = 30, log=True, factor=1):
     """
     min_sec = min_sec * factor
     max_sec = max_sec * factor
-    sleep_time = random.randint(min_sec * 1000, max_sec * 1000) / 1000
+    sleep_time = random.randint(int(min_sec * 1000), int(max_sec * 1000)) / 1000
     if log:
         print(f"Waiting for {sleep_time}s")
     time.sleep(sleep_time)
@@ -93,6 +93,10 @@ class Controller(object):
         :param pas: Ancestry.com password
         """
         self._session = requests.Session()
+        self._session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_1) AppleWebKit/537.36 (KHTML, like Gecko) '
+                          'Chrome/39.0.2171.95 Safari/537.36 '
+        })
         self._username = user
         self._password = pas
         self._login()
@@ -101,19 +105,21 @@ class Controller(object):
         """Authenticate with the ancestry API"""
         if not self._authenticated:
             print("Logging in")
-            self._session.post("https://www.ancestry.com/account/signin/frame/authenticate",
-                               {"username": self._username, "password": self._password})
-            self._authenticated = True
+            login_body = {"username": self._username, "password": self._password}
+            response = self._session.post("https://www.ancestry.com/account/signin/frame/authenticate",
+                                          data=login_body,
+                                          headers={"referer": "https://www.ancestry.com/account/signin/frame?"})
+            self._authenticated = response.status_code == 200
 
     def _init_db_engine(self):
         self._db_engine = create_engine(f'sqlite:///{self._sqlite_file}', echo=True)
         Base.metadata.create_all(self._db_engine)
         self._engine_initialized = True
 
-    def _get_db_session(self) -> Session:
+    def _get_db_session(self, autocommit=False) -> Session:
         if not self._engine_initialized:
             self._init_db_engine()
-        return sessionmaker(bind=self._db_engine)()
+        return sessionmaker(bind=self._db_engine, autocommit=autocommit)()
 
     def _get_metadata_target(self) -> int:
         """ Selects next target for updating collection metadata
@@ -244,6 +250,70 @@ class Controller(object):
             if time.time() - started > limit_seconds:
                 break
 
+    def get_browse_values(self, dbid: int):
+        db_session = self._get_db_session()
+        exists_query = db_session.query(Collection).filter_by(collection_id=dbid)
+
+        def format_url(path: List[str] = None) -> str:
+            url = f"https://www.ancestry.com/imageviewer/api/media/browse-elements?dbId={dbid}"
+            if path is not None:
+                url += f"&path={'|'.join(path)}"
+            return url
+
+        def get_children(path: List[str] = None) -> List[Section]:
+            children = []
+            if path is None:
+                path = []
+            print(path)
+            url = format_url(path=path)
+            response = self._session.get(url).json()["browseElement"]
+            for x2 in response["BrowseSubElements"]:
+                value2, locale_value2, description2 = x2["PathValue"], x2["LocalizedPathValue"], None
+                if "PathDescription" in x2.keys():
+                    description2 = x2["PathDescription"]
+                child_section = Section(value=value2, locale_value=locale_value2,
+                                        has_child_levels=response["ContainsChildLevels"])
+                if description2:
+                    child_section.description = description2
+                if response["ContainsChildLevels"]:
+                    new_path = path.copy()
+                    new_path.append(value2)
+                    child_section.children = get_children(new_path)
+                children.append(
+                        child_section
+                )
+            return children
+
+        if exists_query.scalar():
+            collection = exists_query.first()
+            incompatible_collections = ["Dictionaries, Encyclopedias & Reference"]
+            collection.sections = []
+
+            res = self._session.get(format_url())
+            print(res.text)
+            browse_element = res.json()["browseElement"]
+            has_children = browse_element["ContainsChildLevels"]
+            index = 1
+
+            for x in browse_element["BrowseSubElements"]:
+                value, locale_value, description = x["PathValue"], x["LocalizedPathValue"], None
+                if "PathDescription" in x.keys():
+                    description = x["PathDescription"]
+
+                print(f"section {index} of {len(browse_element['BrowseSubElements'])}")
+                index += 1
+                section = Section(value=value, locale_value=locale_value, has_child_levels=has_children)
+                if description:
+                    section.description = description
+                if has_children:
+                    print("getting children for top section")
+                    section.children = get_children([section.value])
+
+                collection.sections.append(section)
+                db_session.commit()
+            db_session.commit()
+            db_session.close()
+
 
 if __name__ == '__main__':
     dotenv.load_dotenv()
@@ -257,3 +327,5 @@ if __name__ == '__main__':
     # controller.load_collections_into_db_from_disk()
 
     # controller.get_metadata_loop()
+
+    print(controller.get_browse_values(int(input(">>"))))
