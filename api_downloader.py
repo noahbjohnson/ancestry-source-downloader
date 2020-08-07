@@ -274,39 +274,41 @@ class Controller(object):
         self.save_collection_metadata(dbid=dbid)
         db_session = self._get_db_session()
         exists_query = db_session.query(Collection).filter_by(collection_id=dbid)
-
-        def format_url(path: List[str] = None) -> str:
-            url = f"https://www.ancestry.com/imageviewer/api/media/browse-elements?dbId={dbid}"
-            if path is not None:
-                url += f"&path={'|'.join(path)}"
-            return url
-
-        def get_children(path: List[str] = None) -> List[Section]:
-            children = []
-            if path is None:
-                path = []
-            print(path)
-            url = format_url(path=path)
-            response = self._session.get(url).json()["browseElement"]
-            for x2 in response["BrowseSubElements"]:
-                value2, locale_value2, description2 = x2["PathValue"], x2["LocalizedPathValue"], None
-                if "PathDescription" in x2.keys():
-                    description2 = x2["PathDescription"]
-                child_section = Section(value=value2, locale_value=locale_value2,
-                                        has_child_levels=response["ContainsChildLevels"])
-                if description2:
-                    child_section.description = description2
-                if response["ContainsChildLevels"]:
-                    new_path = path.copy()
-                    new_path.append(value2)
-                    child_section.children = get_children(new_path)
-                children.append(
-                        child_section
-                )
-            return children
-
         if exists_query.scalar():
             collection = exists_query.first()
+
+            def format_url(path: List[str] = None) -> str:
+                url = f"https://www.ancestry.com/imageviewer/api/media/browse-elements?dbId={dbid}"
+                if path is not None:
+                    url += f"&path={'|'.join(path)}"
+                return url
+
+            # FIXME: When path has a repeated last item, the results are the same
+            def get_children(path: List[str] = None) -> List[Section]:
+                children: List[Section] = []
+                if path is None:
+                    path = []
+                print(path)
+                url = format_url(path=path)
+                response = self._session.get(url).json()["browseElement"]
+                for x2 in response["BrowseSubElements"]:
+                    value2, locale_value2, description2 = x2["PathValue"], x2["LocalizedPathValue"], None
+                    if "PathDescription" in x2.keys():
+                        description2 = x2["PathDescription"]
+                    child_section = Section(value=value2, locale_value=locale_value2,
+                                            has_child_levels=response["ContainsChildLevels"],
+                                            collection=collection.id)
+                    if description2:
+                        child_section.description = description2
+                    if response["ContainsChildLevels"]:
+                        new_path = path.copy()
+                        new_path.append(value2)
+                        child_section.children = get_children(new_path)
+                    children.append(
+                            child_section
+                    )
+                return children
+
             incompatible_collections = ["Dictionaries, Encyclopedias & Reference"]
             collection.sections = []
 
@@ -349,5 +351,5 @@ if __name__ == '__main__':
 
     # controller.get_metadata_loop()
 
-    # print(controller.get_browse_values(int(input(">>"))))
+    print(controller.get_browse_values(int(input(">>"))))
     print(controller.get_user_data())
