@@ -152,7 +152,7 @@ class Controller(object):
         res = self._session.get(USER_DATA)
         return res.json()
 
-    def save_collection_metadata(self, dbid: int = 0):
+    def save_collection_metadata(self, dbid):
         """ Save metadata to the collection record from endpoints other than search
 
         :param dbid: Optional, which collection id to save metadata for. Defaults to the least recently updated record.
@@ -265,12 +265,13 @@ class Controller(object):
     def get_metadata_loop(self, limit_seconds=600):
         started = time.time()
         while True:
-            self.save_collection_metadata()
+            self.save_collection_metadata(self._get_metadata_target())
             random_sleep(.25, .75)
             if time.time() - started > limit_seconds:
                 break
 
     def get_browse_values(self, dbid: int):
+        self.save_collection_metadata(dbid=dbid)
         db_session = self._get_db_session()
         exists_query = db_session.query(Collection).filter_by(collection_id=dbid)
 
