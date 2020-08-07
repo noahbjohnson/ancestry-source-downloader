@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from models.collection import Base, Collection, Section
 
 API_SEARCH = "https://www.ancestry.com/search/collections/catalog/api/search"
+USER_DATA = "https://www.ancestry.com/app-api/header/userdata/2.1"
 
 
 class InvalidInputError(ValueError):
@@ -38,6 +39,21 @@ class CollectionEntry(TypedDict):
     activity: str
     collectionFeature: str
     description: CollectionEntryDescription
+
+
+class User(TypedDict):
+    name: str
+    image: bool
+    subscribeUrl: str
+    subscribeText: str
+    isFullAccessFreeTrialer: bool
+
+
+class UserData(TypedDict):
+    user: User
+    mostRecentlyViewedTreeId: int
+    hintcount: int
+    messagecount: int
 
 
 def format_pagination_body(page: int, size: int, paging_token=""):
@@ -131,6 +147,10 @@ class Controller(object):
                                                         Collection.collection_feature.asc()).filter_by(
                 database_name=None).first()
         return collection.collection_id
+
+    def get_user_data(self) -> UserData:
+        res = self._session.get(USER_DATA)
+        return res.json()
 
     def save_collection_metadata(self, dbid: int = 0):
         """ Save metadata to the collection record from endpoints other than search
@@ -320,7 +340,7 @@ if __name__ == '__main__':
     username: str = os.getenv("ANCESTRY_USERNAME")
     password: str = os.getenv("ANCESTRY_PASSWORD")
     if username is None or password is None:
-        raise EnvironmentError("Username and password environment variables not set")
+        raise EnvironmentError("Username and/or password environment variables not set")
     controller = Controller(username, password)
 
     # controller.save_collections_to_disk()
@@ -328,4 +348,5 @@ if __name__ == '__main__':
 
     # controller.get_metadata_loop()
 
-    print(controller.get_browse_values(int(input(">>"))))
+    # print(controller.get_browse_values(int(input(">>"))))
+    print(controller.get_user_data())
